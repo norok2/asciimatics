@@ -23,6 +23,10 @@ from .exceptions import ResizeScreenError, StopApplication, NextScene
 from logging import getLogger
 logger = getLogger(__name__)
 
+# Looks like pywin32 is missing some Windows constants
+ENABLE_EXTENDED_FLAGS = 0x0080
+ENABLE_QUICK_EDIT_MODE = 0x0040
+
 
 class _AbstractCanvas(with_metaclass(ABCMeta, object)):
     """
@@ -415,8 +419,7 @@ class _AbstractCanvas(with_metaclass(ABCMeta, object)):
         if len(text) > 0:
             for i, c in enumerate(text):
                 if c != " " or not transparent:
-                    self._double_buffer[y][x + i] = (str(c), colour, attr,
-                                                             bg)
+                    self._double_buffer[y][x + i] = (str(c), colour, attr, bg)
 
     @property
     def start_line(self):
@@ -913,9 +916,12 @@ class Screen(with_metaclass(ABCMeta, _AbstractCanvas)):
             win_out.SetConsoleMode(
                 out_mode & ~ win32console.ENABLE_WRAP_AT_EOL_OUTPUT)
 
-            # Enable mouse input and disable ctrl-c if needed.
+            # Enable mouse input, disable quick-edit mode and disable ctrl-c
+            # if needed.
             in_mode = win_in.GetConsoleMode()
-            new_mode = in_mode | win32console.ENABLE_MOUSE_INPUT
+            new_mode = (in_mode | win32console.ENABLE_MOUSE_INPUT |
+                        ENABLE_EXTENDED_FLAGS)
+            new_mode &= ~ENABLE_QUICK_EDIT_MODE
             if catch_interrupt:
                 # Ignore ctrl-c handlers if specified.
                 new_mode &= ~win32console.ENABLE_PROCESSED_INPUT
@@ -1108,13 +1114,16 @@ class Screen(with_metaclass(ABCMeta, _AbstractCanvas)):
         # Mainline loop for animations
         try:
             while True:
+                a = time.time()
                 self.draw_next_frame()
                 if self.has_resized():
                     if stop_on_resize:
                         self._scenes[self._scene_index].exit()
                         raise ResizeScreenError("Screen resized",
                                                 self._scenes[self._scene_index])
-                time.sleep(0.05)
+                b = time.time()
+                if b - a < 0.05:
+                    time.sleep(a + 0.05 - b)
         except StopApplication:
             # Time to stop  - just exit the function.
             return
@@ -1455,14 +1464,18 @@ if sys.platform == "win32":
                 event = self._stdin.ReadConsoleInput(1)[0]
                 if event.EventType == win32console.KEY_EVENT:
                     # Pasting unicode text appears to just generate key-up
-                    # events, but the rest of the console input simply doesn't
+                    # events (as if you had pressed the Alt keys plus the
+                    # keypad code for the character), but the rest of the
+                    # console input simply doesn't
                     # work with key up events - e.g. misses keyboard repeats.
                     #
                     # We therefore allow any key press (i.e. KeyDown) event and
-                    # _any_ event that appears to have popped up from nowhere.
+                    # _any_ event that appears to have popped up from nowhere
+                    # as long as the Alt key is present.
                     key_code = ord(event.Char)
                     if (event.KeyDown or
-                            (key_code > 0 and key_code not in self._keys)):
+                            (key_code > 0 and key_code not in self._keys and
+                             event.VirtualKeyCode == win32con.VK_MENU)):
                         # Record any keys that were pressed.
                         if event.KeyDown:
                             self._keys.add(key_code)
